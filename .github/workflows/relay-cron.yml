@@ -20,8 +20,10 @@ jobs:
           RELAY_URL: ${{ secrets.RELAY_URL }}
           PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
         run: |
-          curl -fsS --retry 3 -X POST "$RELAY_URL/renew" \
-            -H "x-provision-token: $PROVISION_TOKEN"
+          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"
+          URL="${URL%/}"
+          curl -fsS --retry 3 -X POST "$URL/renew" \
+            -H "x-provision-token: $(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
           echo
 
   sync:
@@ -33,6 +35,8 @@ jobs:
           RELAY_URL: ${{ secrets.RELAY_URL }}
           PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
         run: |
-          curl -fsS --retry 3 -X POST "$RELAY_URL/sync" \
-            -H "x-provision-token: $PROVISION_TOKEN"
+          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"
+          URL="${URL%/}"
+          curl -fsS --retry 3 -X POST "$URL/sync" \
+            -H "x-provision-token: $(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
           echo
