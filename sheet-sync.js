@@ -101,7 +101,7 @@ async function poll() {
       const phone = String(row[cols.phone] || "").replace(/\D/g, "");
       const sales = String(row[cols.sales] || "").trim();
       if (!name || phone.length < 10) continue;
-      if (store.byPhone(phone)) continue; // already has a space
+      if (await store.byPhone(phone)) continue; // already has a space
 
       candidates++;
       if (DRY_RUN) {

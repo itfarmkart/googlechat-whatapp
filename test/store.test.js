@@ -43,8 +43,8 @@ test("toChatId throws on an empty / non-numeric phone", () => {
   assert.throws(() => store.toChatId("abc"), /empty phone/);
 });
 
-test("addRoute inserts a new route and it is findable both ways", () => {
-  const route = store.addRoute({
+test("addRoute inserts a new route and it is findable both ways", async () => {
+  const route = await store.addRoute({
     customerName: "Ramesh Patidar",
     customerPhone: "919876543210",
     spaceName: "spaces/AAA",
@@ -55,34 +55,34 @@ test("addRoute inserts a new route and it is findable both ways", () => {
   assert.equal(route.customerName, "Ramesh Patidar");
   assert.ok(route.createdAt, "createdAt is stamped");
 
-  assert.deepEqual(store.bySpace("spaces/AAA"), route);
-  assert.deepEqual(store.byChatId("919876543210@c.us"), route);
-  assert.equal(store.all().length, 1);
+  assert.deepEqual(await store.bySpace("spaces/AAA"), route);
+  assert.deepEqual(await store.byChatId("919876543210@c.us"), route);
+  assert.equal((await store.all()).length, 1);
 });
 
-test("addRoute updates in place when the same number is provisioned again", () => {
-  store.addRoute({
+test("addRoute updates in place when the same number is provisioned again", async () => {
+  await store.addRoute({
     customerName: "Old Name",
     customerPhone: "919876543210",
     spaceName: "spaces/OLD",
     department: "solar",
   });
 
-  const updated = store.addRoute({
+  const updated = await store.addRoute({
     customerName: "New Name",
     customerPhone: "919876543210",
     spaceName: "spaces/NEW",
     department: "agri",
   });
 
-  assert.equal(store.all().length, 1, "no duplicate row");
+  assert.equal((await store.all()).length, 1, "no duplicate row");
   assert.equal(updated.customerName, "New Name");
   assert.equal(updated.spaceName, "spaces/NEW");
   assert.equal(updated.department, "agri");
-  assert.equal(store.bySpace("spaces/OLD"), null, "old space no longer maps");
+  assert.equal(await store.bySpace("spaces/OLD"), null, "old space no longer maps");
 });
 
-test("lookups return null when nothing matches", () => {
-  assert.equal(store.bySpace("spaces/nope"), null);
-  assert.equal(store.byChatId("910000000000@c.us"), null);
+test("lookups return null when nothing matches", async () => {
+  assert.equal(await store.bySpace("spaces/nope"), null);
+  assert.equal(await store.byChatId("910000000000@c.us"), null);
 });

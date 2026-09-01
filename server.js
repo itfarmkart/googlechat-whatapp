@@ -122,7 +122,7 @@ async function relayChatMessage({
   const clean = (text || "").trim();
   if (!clean || clean.startsWith("//")) return; // empty or internal-only
 
-  const route = store.bySpace(spaceName);
+  const route = await store.bySpace(spaceName);
   if (!route) {
     console.log(`chat msg in unmapped space ${spaceName}`);
     return;
@@ -143,6 +143,33 @@ async function relayChatMessage({
       `⚠️ Not delivered to WhatsApp: ${err.message}`
     ).catch((e) => console.error("failure notice post failed:", e.message));
   }
+}
+
+/**
+ * Turn a Workspace Events `chat.message.v1.created` payload into a relay call.
+ * Shared by the Pub/Sub push route (/pubsub) and the local pull listener.
+ */
+async function handleChatEvent({ message, messageName }) {
+  let msg = message;
+  if (!msg?.text && messageName) {
+    try {
+      msg = await getMessage(messageName);
+    } catch (err) {
+      console.error("getMessage failed:", err.message);
+      return;
+    }
+  }
+  if (!msg) return;
+
+  await relayChatMessage({
+    spaceName:
+      msg.space?.name || (messageName || "").split("/messages/")[0] || undefined,
+    text: events.cleanText(msg),
+    senderId: msg.sender?.name,
+    senderName: msg.sender?.displayName,
+    senderType: msg.sender?.type,
+    messageName: msg.name || messageName,
+  });
 }
 
 app.post("/gchat", async (req, res) => {
@@ -191,7 +218,7 @@ app.post("/periskope", async (req, res) => {
   if (data?.from_me) return; // our own outbound, would loop
   if (isDuplicate(data?.message_id || data?.unique_id)) return;
 
-  const route = store.byChatId(data.chat_id);
+  const route = await store.byChatId(data.chat_id);
   if (!route) {
     console.log(`unmapped inbound from ${data.chat_id}`);
     return;
@@ -261,55 +288,103 @@ app.post("/provision", async (req, res) => {
   }
 });
 
-// Trigger a sheet sync now (same guard as /provision).
+// ------------------------------- Pub/Sub push (Workspace Events -> relay)
+
+const PUBSUB_PUSH_AUDIENCE = process.env.PUBSUB_PUSH_AUDIENCE; // optional
+const PUBSUB_PUSH_SA = process.env.PUBSUB_PUSH_SA; // SA Pub/Sub signs the push as
+
+async function verifyPubsubPush(req) {
+  const hdr = req.headers.authorization || "";
+  if (hdr.startsWith("Bearer ")) {
+    const ticket = await googleAuth.verifyIdToken({
+      idToken: hdr.slice(7),
+      audience: PUBSUB_PUSH_AUDIENCE || undefined,
+    });
+    const p = ticket.getPayload();
+    if (!p || p.email_verified === false) throw new Error("email not verified");
+    if (PUBSUB_PUSH_SA && p.email !== PUBSUB_PUSH_SA) {
+      throw new Error(`unexpected pusher ${p.email}`);
+    }
+    return;
+  }
+  // fallback: shared token in the query string (?token=…)
+  if (PROVISION_TOKEN && safeEqual(req.query.token, PROVISION_TOKEN)) return;
+  throw new Error("no valid auth");
+}
+
+app.post("/pubsub", async (req, res) => {
+  try {
+    await verifyPubsubPush(req);
+  } catch (err) {
+    console.error("pubsub push auth failed:", err.message);
+    return res.status(401).send("unauthorized");
+  }
+
+  const m = req.body && req.body.message;
+  res.status(204).end(); // ack immediately; process off the response path
+  if (!m) return;
+
+  try {
+    if (isDuplicate(`ps:${m.messageId || m.message_id}`)) return;
+    const decoded = m.data ? Buffer.from(m.data, "base64").toString("utf8") : "";
+    const parsed = events.parseChatEvent({
+      data: decoded,
+      attributes: m.attributes,
+    });
+    if (parsed && parsed.eventType === events.EVENT_TYPE) {
+      await handleChatEvent(parsed);
+    }
+  } catch (err) {
+    console.error("pubsub push handler error:", err.message);
+  }
+});
+
+// ------------------------------- cron: renew the Events subscription
+
+app.post("/renew", async (req, res) => {
+  if (!PROVISION_TOKEN) return res.status(503).json({ error: "PROVISION_TOKEN not set" });
+  const tok = req.headers["x-provision-token"] || req.query.token;
+  if (!safeEqual(tok, PROVISION_TOKEN)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const r = await events.renewSubscription();
+    res.json({ ok: true, ...r });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Trigger a sheet sync now (same guard as /provision; token via header or ?token=).
 app.post("/sync", async (req, res) => {
   if (!PROVISION_TOKEN) return res.status(503).json({ error: "PROVISION_TOKEN not set" });
-  if (!safeEqual(req.headers["x-provision-token"], PROVISION_TOKEN)) {
+  const tok = req.headers["x-provision-token"] || req.query.token;
+  if (!safeEqual(tok, PROVISION_TOKEN)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const result = await sheetSync.poll();
   res.json({ ok: true, ...result });
 });
 
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, routes: store.all().length })
-);
+app.get("/health", async (_req, res) => {
+  try {
+    const routes = await store.all();
+    res.json({ ok: true, routes: routes.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 if (require.main === module) {
   app.listen(PORT, () => console.log(`relay on :${PORT}`));
 
-  // Stream every space message in via Workspace Events -> Pub/Sub, so team
-  // leads don't have to @mention the app. Set DISABLE_EVENTS=1 to skip.
+  // Local dev: hold a Pub/Sub *pull* listener. On Vercel this block never runs;
+  // events arrive as *push* requests to /pubsub instead.
   if (process.env.DISABLE_EVENTS !== "1") {
-    const onMessage = async ({ message, messageName }) => {
-      let msg = message;
-      if (!msg?.text && messageName) {
-        try {
-          msg = await getMessage(messageName);
-        } catch (err) {
-          console.error("getMessage failed:", err.message);
-          return;
-        }
-      }
-      if (!msg) return;
-
-      await relayChatMessage({
-        spaceName:
-          msg.space?.name ||
-          (messageName || "").split("/messages/")[0] ||
-          undefined,
-        text: events.cleanText(msg),
-        senderId: msg.sender?.name,
-        senderName: msg.sender?.displayName,
-        senderType: msg.sender?.type,
-        messageName: msg.name || messageName,
-      });
-    };
-
     // Retry with backoff — e.g. while the chat.messages.readonly delegation
     // scope is still propagating after setup.
     const startEvents = (attempt = 0) =>
-      events.start({ onMessage }).catch((err) => {
+      events.start({ onMessage: handleChatEvent }).catch((err) => {
         const wait = Math.min(60_000, 5_000 * 2 ** attempt);
         console.error(
           `events startup failed (${err.message}); retrying in ${wait / 1000}s`

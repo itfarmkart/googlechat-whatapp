@@ -16,6 +16,32 @@ const KEY_FILE = process.env.GOOGLE_KEY_FILE || "./service-account.json";
 const IMPERSONATE = process.env.GOOGLE_IMPERSONATE_USER; // ops@farmkart.com
 const CHAT_BASE = "https://chat.googleapis.com/v1";
 
+/**
+ * Service-account key: from GOOGLE_CREDENTIALS_JSON (raw JSON or base64) on
+ * hosts with no filesystem (Vercel), else the key file. Cached.
+ */
+let _key;
+function serviceAccountKey() {
+  if (_key) return _key;
+  const raw = process.env.GOOGLE_CREDENTIALS_JSON;
+  if (raw) {
+    const json = raw.trim().startsWith("{")
+      ? raw
+      : Buffer.from(raw, "base64").toString("utf8");
+    _key = JSON.parse(json);
+  } else {
+    _key = require(require("path").resolve(KEY_FILE));
+  }
+  return _key;
+}
+
+/** GoogleAuth options for the SA's own identity, file- or env-based. */
+function googleAuthOpts(scopes) {
+  return process.env.GOOGLE_CREDENTIALS_JSON
+    ? { credentials: serviceAccountKey(), scopes }
+    : { keyFile: KEY_FILE, scopes };
+}
+
 const PERISKOPE_BASE = "https://api.periskope.app/v1";
 const PERISKOPE_API_KEY = process.env.PERISKOPE_API_KEY;
 const PERISKOPE_PHONE = process.env.PERISKOPE_PHONE;
@@ -26,11 +52,11 @@ const saClients = new Map();
 
 /** Token for the service account's own identity (no impersonation). */
 async function saToken(scopes) {
-  const key = scopes.join(" ");
-  if (!saClients.has(key)) {
-    saClients.set(key, new GoogleAuth({ keyFile: KEY_FILE, scopes }));
+  const cacheKey = scopes.join(" ");
+  if (!saClients.has(cacheKey)) {
+    saClients.set(cacheKey, new GoogleAuth(googleAuthOpts(scopes)));
   }
-  const client = await saClients.get(key).getClient();
+  const client = await saClients.get(cacheKey).getClient();
   const { token } = await client.getAccessToken();
   return token;
 }
@@ -38,7 +64,7 @@ async function saToken(scopes) {
 const appToken = () => saToken(["https://www.googleapis.com/auth/chat.bot"]);
 
 async function userToken(scopes) {
-  const key = require(require("path").resolve(KEY_FILE));
+  const key = serviceAccountKey();
   const jwt = new JWT({
     email: key.client_email,
     key: key.private_key,
@@ -180,4 +206,5 @@ module.exports = {
   checkContact,
   userToken,
   saToken,
+  serviceAccountKey,
 };

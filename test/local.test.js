@@ -74,6 +74,11 @@ require.cache[clientsPath] = {
     },
     userToken: async () => "stub-token",
     saToken: async () => "stub-sa-token",
+    serviceAccountKey: () => ({
+      project_id: "test-project",
+      client_email: "sa@test.iam.gserviceaccount.com",
+      private_key: "x",
+    }),
     checkContact: async (phone) => {
       calls.contacts.push(phone);
       return contactResult;
@@ -119,7 +124,7 @@ async function waitFor(predicate, ms = 500) {
   throw new Error("waitFor: condition not met in time");
 }
 
-function seedRoute(overrides = {}) {
+async function seedRoute(overrides = {}) {
   return store.addRoute({
     customerName: "Ramesh Patidar",
     customerPhone: "919876543210",
@@ -132,7 +137,7 @@ function seedRoute(overrides = {}) {
 // ---- /health ----------------------------------------------------------------
 
 test("GET /health reports route count", async () => {
-  seedRoute();
+  await seedRoute();
   const res = await fetch(`${base}/health`);
   const json = await res.json();
   assert.equal(res.status, 200);
@@ -154,7 +159,7 @@ test("ADDED_TO_SPACE replies with the space id", async () => {
 });
 
 test("a normal MESSAGE is relayed to WhatsApp with the sender's name", async () => {
-  seedRoute();
+  await seedRoute();
   const res = await fetch(`${base}/gchat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -173,7 +178,7 @@ test("a normal MESSAGE is relayed to WhatsApp with the sender's name", async () 
 });
 
 test("a line starting with // stays internal", async () => {
-  seedRoute();
+  await seedRoute();
   await fetch(`${base}/gchat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -202,7 +207,7 @@ test("MESSAGE in an unmapped space is acked and not relayed", async () => {
 });
 
 test("a bot-sent MESSAGE is not relayed (loop guard)", async () => {
-  seedRoute();
+  await seedRoute();
   await fetch(`${base}/gchat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -219,7 +224,7 @@ test("a bot-sent MESSAGE is not relayed (loop guard)", async () => {
 });
 
 test("the same message via two paths only relays once (dedupe by name)", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     type: "MESSAGE",
     space: { name: "spaces/AAA" },
@@ -252,6 +257,77 @@ test("with real verification on, a request with no bearer token is 401", async (
   }
 });
 
+// ---- Pub/Sub push (/pubsub) --------------------------------------------
+
+function pushEnvelope(chatMessage, messageId = "ps-1") {
+  const payload = JSON.stringify({ message: chatMessage });
+  return JSON.stringify({
+    message: {
+      data: Buffer.from(payload, "utf8").toString("base64"),
+      attributes: { "ce-type": "google.workspace.chat.message.v1.created" },
+      messageId,
+    },
+    subscription: "projects/x/subscriptions/chat-events-sub",
+  });
+}
+
+test("/pubsub without auth is 401", async () => {
+  const res = await fetch(`${base}/pubsub`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: pushEnvelope({ name: "spaces/AAA/messages/1", text: "hi" }),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(calls.wa.length, 0);
+});
+
+test("/pubsub with ?token relays a HUMAN chat message", async () => {
+  await seedRoute();
+  const res = await fetch(`${base}/pubsub?token=${PROVISION_TOKEN}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: pushEnvelope(
+      {
+        name: "spaces/AAA/messages/PS1",
+        text: "quote is ready",
+        space: { name: "spaces/AAA" },
+        sender: { name: "users/55", displayName: "Priya Sharma", type: "HUMAN" },
+      },
+      "ps-relay-1"
+    ),
+  });
+  assert.equal(res.status, 204);
+  await waitFor(() => calls.wa.length === 1);
+  assert.match(calls.wa[0].message, /quote is ready/);
+  assert.match(calls.wa[0].message, /_Priya Sharma, Farmkart_/);
+});
+
+test("/pubsub drops a bot-sent message (loop guard)", async () => {
+  await seedRoute();
+  await fetch(`${base}/pubsub?token=${PROVISION_TOKEN}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: pushEnvelope(
+      {
+        name: "spaces/AAA/messages/PS2",
+        text: "*Ramesh*\nhello",
+        space: { name: "spaces/AAA" },
+        sender: { name: "users/app", type: "BOT" },
+      },
+      "ps-bot-1"
+    ),
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(calls.wa.length, 0);
+});
+
+// ---- /renew ------------------------------------------------------------
+
+test("/renew without token is 401", async () => {
+  const res = await fetch(`${base}/renew`, { method: "POST" });
+  assert.equal(res.status, 401);
+});
+
 // ---- direction B: /periskope (customer -> team lead) ---------------------
 
 test("a bad signature is rejected with 401", async () => {
@@ -265,7 +341,7 @@ test("a bad signature is rejected with 401", async () => {
 });
 
 test("an inbound text message is posted into the space with the customer name", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: {
@@ -289,7 +365,7 @@ test("an inbound text message is posted into the space with the customer name", 
 });
 
 test("our own outbound (from_me) is ignored", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: { message_id: "m-200", chat_id: "919876543210@c.us", body: "hi", from_me: true },
@@ -304,7 +380,7 @@ test("our own outbound (from_me) is ignored", async () => {
 });
 
 test("a redelivered message (same id) is only posted once", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: {
@@ -327,7 +403,7 @@ test("a redelivered message (same id) is only posted once", async () => {
 });
 
 test("a media message with no caption posts the file link", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: {
@@ -355,7 +431,7 @@ test("a media message with no caption posts the file link", async () => {
 });
 
 test("a media message WITH a caption keeps both caption and link", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: {
@@ -378,7 +454,7 @@ test("a media message WITH a caption keeps both caption and link", async () => {
 });
 
 test("media with no url falls back to a note, still posts", async () => {
-  seedRoute();
+  await seedRoute();
   const body = JSON.stringify({
     event_type: "message.created",
     data: {
@@ -425,7 +501,7 @@ test("provision refuses a number that is not on WhatsApp", async () => {
   assert.equal(json.ok, false);
   assert.match(json.error, /not registered on WhatsApp/);
   assert.equal(calls.spaces.length, 0, "no space created");
-  assert.equal(store.byChatId("919222222222@c.us"), null);
+  assert.equal(await store.byChatId("919222222222@c.us"), null);
 });
 
 test("provision creates a space, adds the app and saves a route", async () => {
@@ -450,7 +526,7 @@ test("provision creates a space, adds the app and saves a route", async () => {
   assert.equal(json.route.chatId, "919111111111@c.us");
   assert.equal(calls.spaces.length, 1);
   assert.match(calls.spaces[0].displayName, /New Customer — RS-9001/);
-  assert.deepEqual(store.byChatId("919111111111@c.us"), json.route);
+  assert.deepEqual(await store.byChatId("919111111111@c.us"), json.route);
 
   // spaces:setup gets only same-domain members
   for (const e of calls.spaces[0].memberEmails) {

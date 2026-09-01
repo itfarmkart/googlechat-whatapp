@@ -118,7 +118,7 @@ async function provision({
   console.log("  bridge app added");
 
   // 4. Save the mapping the relay reads on every message.
-  const route = store.addRoute({
+  const route = await store.addRoute({
     customerName: name,
     customerPhone: phone,
     spaceName: space.name,

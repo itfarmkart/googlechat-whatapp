@@ -88,7 +88,7 @@ test("provisions only Completed rows at/after SHEET_FIRST_ROW", async () => {
 });
 
 test("skips a phone that already has a route", async () => {
-  store.addRoute({
+  await store.addRoute({
     customerName: "Ramesh Patidar",
     customerPhone: "919000001071",
     spaceName: "spaces/EXISTING",

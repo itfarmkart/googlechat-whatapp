@@ -1,0 +1,38 @@
+name: relay-cron
+
+# Vercel is serverless — these two schedulers run here instead.
+#   RELAY_URL        e.g. https://googlechat-whatapp.vercel.app   (no trailing slash)
+#   PROVISION_TOKEN  same value as the app's PROVISION_TOKEN env var
+# Add both under: repo Settings -> Secrets and variables -> Actions.
+
+on:
+  schedule:
+    - cron: "17 * * * *"      # hourly-ish: renew the Workspace Events subscription
+    - cron: "30 6,18 * * *"   # 12:00 & 00:00 IST: sync the Leegality sheet
+  workflow_dispatch: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Renew Workspace Events subscription
+        env:
+          RELAY_URL: ${{ secrets.RELAY_URL }}
+          PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
+        run: |
+          curl -fsS --retry 3 -X POST "$RELAY_URL/renew" \
+            -H "x-provision-token: $PROVISION_TOKEN"
+          echo
+
+  sync:
+    if: github.event.schedule == '30 6,18 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Leegality sheet
+        env:
+          RELAY_URL: ${{ secrets.RELAY_URL }}
+          PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
+        run: |
+          curl -fsS --retry 3 -X POST "$RELAY_URL/sync" \
+            -H "x-provision-token: $PROVISION_TOKEN"
+          echo

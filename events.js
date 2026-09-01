@@ -11,8 +11,7 @@
  * and recreate on startup if missing.
  */
 
-const path = require("path");
-const { userToken } = require("./clients");
+const { userToken, serviceAccountKey } = require("./clients");
 
 const KEY_FILE = process.env.GOOGLE_KEY_FILE || "./service-account.json";
 const EVENTS_BASE = "https://workspaceevents.googleapis.com/v1";
@@ -24,8 +23,9 @@ const SCOPE = "https://www.googleapis.com/auth/chat.messages.readonly";
 const SUBSCRIPTION_ID = process.env.PUBSUB_SUBSCRIPTION || "chat-events-sub";
 
 function projectId() {
-  if (process.env.GOOGLE_CLOUD_PROJECT) return process.env.GOOGLE_CLOUD_PROJECT;
-  return require(path.resolve(KEY_FILE)).project_id;
+  return (
+    process.env.GOOGLE_CLOUD_PROJECT || serviceAccountKey().project_id
+  );
 }
 
 function pubsubTopic() {
@@ -122,6 +122,20 @@ async function renew(name) {
     `${EVENTS_BASE}/${name}?updateMask=ttl`,
     { method: "PATCH", body: { ttl: "0s" } }
   );
+}
+
+/**
+ * Called by the /renew cron: extend the subscription's TTL, or (re)create it
+ * if it's gone. Returns a small status object.
+ */
+async function renewSubscription() {
+  const s = await findExisting();
+  if (s && s.state === "ACTIVE") {
+    await renew(s.name);
+    return { renewed: s.name };
+  }
+  const created = await ensureSubscription();
+  return { created: created?.name || null };
 }
 
 // --------------------------------------------------------- pub/sub payload
@@ -236,6 +250,7 @@ module.exports = {
   stop,
   ensureSubscription,
   renew,
+  renewSubscription,
   parseChatEvent,
   cleanText,
   pubsubTopic,
