@@ -84,15 +84,26 @@ function mysqlPool() {
     enableKeepAlive: true,
     namedPlaceholders: false,
   };
-  const ssl =
-    process.env.MYSQL_SSL === "1" || /ssl-mode=REQUIRED/i.test(process.env.DATABASE_URL || "")
-      ? { minVersion: "TLSv1.2", rejectUnauthorized: true }
-      : undefined;
+  // MYSQL_SSL=1 -> encrypted; verify the chain only if MYSQL_CA is supplied
+  // (managed DBs like DigitalOcean use a private CA the host doesn't trust).
+  const wantSsl =
+    process.env.MYSQL_SSL === "1" ||
+    /ssl-mode=REQUIRED/i.test(process.env.DATABASE_URL || "");
+  const ssl = wantSsl
+    ? {
+        minVersion: "TLSv1.2",
+        rejectUnauthorized: !!process.env.MYSQL_CA,
+        ca: process.env.MYSQL_CA || undefined,
+      }
+    : undefined;
 
-  pool = process.env.DATABASE_URL
-    ? mysql.createPool(
-        Object.assign({ uri: process.env.DATABASE_URL }, common, ssl ? { ssl } : {})
-      )
+  // mysql2 doesn't grok query params like ?ssl-mode=REQUIRED — strip them.
+  const uri = process.env.DATABASE_URL
+    ? process.env.DATABASE_URL.split("?")[0]
+    : null;
+
+  pool = uri
+    ? mysql.createPool(Object.assign({ uri }, common, ssl ? { ssl } : {}))
     : mysql.createPool(
         Object.assign(
           {
