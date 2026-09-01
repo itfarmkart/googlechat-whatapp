@@ -190,31 +190,27 @@ app.post("/gchat", async (req, res) => {
 
   if (event.type !== "MESSAGE") return res.json({});
 
-  // Ack Chat immediately; relaying happens off the response path. Most messages
-  // arrive via the Pub/Sub stream — this branch only fires on an @mention.
+  // Do the work before responding — on serverless the function is frozen once
+  // the response is sent. This branch only fires on an @mention (the bulk of
+  // traffic comes through /pubsub).
+  try {
+    await relayChatMessage({
+      spaceName: event.space?.name,
+      text: event.message?.argumentText ?? event.message?.text,
+      senderId: event.message?.sender?.name,
+      senderName: event.message?.sender?.displayName,
+      senderType: event.message?.sender?.type,
+      messageName: event.message?.name,
+    });
+  } catch (err) {
+    console.error("gchat relay error:", err.message);
+  }
   res.json({});
-
-  relayChatMessage({
-    spaceName: event.space?.name,
-    text: event.message?.argumentText ?? event.message?.text,
-    senderId: event.message?.sender?.name,
-    senderName: event.message?.sender?.displayName,
-    senderType: event.message?.sender?.type,
-    messageName: event.message?.name,
-  });
 });
 
 // ------------------------------------ direction B: WhatsApp -> Google Chat
 
-app.post("/periskope", async (req, res) => {
-  if (!verifyPeriskope(req.rawBody, req.headers["x-periskope-signature"])) {
-    return res.status(401).send("Invalid signature");
-  }
-
-  res.status(200).send("ok"); // ack first, work after
-
-  const { event_type, data } = req.body;
-  if (event_type !== "message.created") return;
+async function periskopeInbound(data) {
   if (data?.from_me) return; // our own outbound, would loop
   if (isDuplicate(data?.message_id || data?.unique_id)) return;
 
@@ -253,12 +249,23 @@ app.post("/periskope", async (req, res) => {
     return;
   }
 
-  try {
-    await postToSpace(route.spaceName, text);
-    console.log(`-> chat ${route.spaceName}`);
-  } catch (err) {
-    console.error("chat post failed:", err.message);
+  await postToSpace(route.spaceName, text);
+  console.log(`-> chat ${route.spaceName}`);
+}
+
+app.post("/periskope", async (req, res) => {
+  if (!verifyPeriskope(req.rawBody, req.headers["x-periskope-signature"])) {
+    return res.status(401).send("Invalid signature");
   }
+
+  // Serverless: finish the work before responding, or the function is frozen.
+  try {
+    const { event_type, data } = req.body;
+    if (event_type === "message.created") await periskopeInbound(data);
+  } catch (err) {
+    console.error("periskope inbound error:", err.message);
+  }
+  res.status(200).send("ok");
 });
 
 // ------------------------------------------------- provisioning from a CRM
@@ -321,21 +328,26 @@ app.post("/pubsub", async (req, res) => {
   }
 
   const m = req.body && req.body.message;
-  res.status(204).end(); // ack immediately; process off the response path
-  if (!m) return;
 
+  // Serverless: process before responding — the function is frozen once the
+  // response is sent. A 204 tells Pub/Sub to ack; a 500 makes it retry.
   try {
-    if (isDuplicate(`ps:${m.messageId || m.message_id}`)) return;
-    const decoded = m.data ? Buffer.from(m.data, "base64").toString("utf8") : "";
-    const parsed = events.parseChatEvent({
-      data: decoded,
-      attributes: m.attributes,
-    });
-    if (parsed && parsed.eventType === events.EVENT_TYPE) {
-      await handleChatEvent(parsed);
+    if (m && !isDuplicate(`ps:${m.messageId || m.message_id}`)) {
+      const decoded = m.data
+        ? Buffer.from(m.data, "base64").toString("utf8")
+        : "";
+      const parsed = events.parseChatEvent({
+        data: decoded,
+        attributes: m.attributes,
+      });
+      if (parsed && parsed.eventType === events.EVENT_TYPE) {
+        await handleChatEvent(parsed);
+      }
     }
+    res.status(204).end();
   } catch (err) {
     console.error("pubsub push handler error:", err.message);
+    res.status(500).end(); // Pub/Sub will redeliver
   }
 });
 
