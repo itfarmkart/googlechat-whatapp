@@ -1,0 +1,326 @@
+/**
+ * Relay server.
+ *
+ *   POST /gchat              Google Chat app endpoint  (team lead -> customer)
+ *   POST /periskope          Periskope webhook         (customer -> team lead)
+ *   POST /provision          Create a space for a customer from your CRM
+ *
+ * Run behind https. Google Chat and Periskope both need a public URL.
+ */
+
+const express = require("express");
+const { createHmac, timingSafeEqual } = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
+
+const { postToSpace, sendWhatsApp, getMessage } = require("./clients");
+const { provision } = require("./provision");
+const store = require("./store");
+const events = require("./events");
+const sheetSync = require("./sheet-sync");
+const { resolveName } = require("./directory");
+
+const PORT = process.env.PORT || 8080;
+const GOOGLE_PROJECT_NUMBER = process.env.GOOGLE_PROJECT_NUMBER;
+const PERISKOPE_SIGNING_KEY = process.env.PERISKOPE_SIGNING_KEY;
+const PROVISION_TOKEN = process.env.PROVISION_TOKEN;
+
+const app = express();
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf.toString("utf8");
+    },
+  })
+);
+
+// ------------------------------------------------------------ verification
+
+const googleAuth = new OAuth2Client();
+
+// Google Chat signs request tokens with this service account, not with the
+// OAuth2 federated keys that verifyIdToken() expects — so we fetch its x509
+// certs and verify against them directly.
+const CHAT_ISSUER = "chat@system.gserviceaccount.com";
+const CHAT_CERT_URL =
+  "https://www.googleapis.com/service_accounts/v1/metadata/x509/" + CHAT_ISSUER;
+
+let certCache = { certs: null, expiresAt: 0 };
+
+async function chatCerts() {
+  if (certCache.certs && Date.now() < certCache.expiresAt) return certCache.certs;
+
+  const res = await fetch(CHAT_CERT_URL);
+  if (!res.ok) throw new Error(`cert fetch failed: ${res.status}`);
+  const certs = await res.json();
+
+  const m = /max-age=(\d+)/.exec(res.headers.get("cache-control") || "");
+  const ttl = m ? Number(m[1]) * 1000 : 3_600_000;
+  certCache = { certs, expiresAt: Date.now() + ttl };
+  return certs;
+}
+
+async function verifyGoogleChat(req) {
+  // Local testing only: skip token verification so the relay logic can be
+  // exercised without a Google-signed request. Never set this in production.
+  if (process.env.SKIP_GCHAT_AUTH === "1") return;
+
+  if (!GOOGLE_PROJECT_NUMBER) throw new Error("GOOGLE_PROJECT_NUMBER is not set");
+
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) throw new Error("missing bearer token");
+
+  // Throws unless the token is validly signed by CHAT_ISSUER, unexpired, and
+  // carries aud === our project number.
+  await googleAuth.verifySignedJwtWithCertsAsync(
+    header.slice(7),
+    await chatCerts(),
+    GOOGLE_PROJECT_NUMBER,
+    [CHAT_ISSUER]
+  );
+}
+
+function verifyPeriskope(rawBody, signature) {
+  if (!signature || !PERISKOPE_SIGNING_KEY) return false;
+  const digest = createHmac("sha256", PERISKOPE_SIGNING_KEY)
+    .update(rawBody)
+    .digest("hex");
+  const a = Buffer.from(digest);
+  const b = Buffer.from(String(signature));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Periskope retries on non-2xx and can redeliver. Drop repeats.
+const seen = new Map();
+function isDuplicate(id) {
+  if (!id) return false;
+  const now = Date.now();
+  for (const [k, t] of seen) if (now - t > 600_000) seen.delete(k);
+  if (seen.has(id)) return true;
+  seen.set(id, now);
+  return false;
+}
+
+// ------------------------------------ direction A: Google Chat -> WhatsApp
+
+/**
+ * Relay one space message to the customer. Fed by two paths that can both see
+ * the same message — the /gchat webhook (when the app is @mentioned) and the
+ * Workspace Events -> Pub/Sub stream (every message) — so it dedupes by
+ * message name and drops anything a bot sent (our own posts would loop).
+ */
+async function relayChatMessage({
+  spaceName,
+  text,
+  senderId,
+  senderName,
+  senderType,
+  messageName,
+}) {
+  if (messageName && isDuplicate(`msg:${messageName}`)) return;
+  if (senderType && senderType !== "HUMAN") return; // our own / other apps
+
+  const clean = (text || "").trim();
+  if (!clean || clean.startsWith("//")) return; // empty or internal-only
+
+  const route = store.bySpace(spaceName);
+  if (!route) {
+    console.log(`chat msg in unmapped space ${spaceName}`);
+    return;
+  }
+
+  const name = await resolveName(senderId, senderName);
+  const signature = name ? `${name}, Farmkart` : "Farmkart team";
+  try {
+    const result = await sendWhatsApp({
+      chat_id: route.chatId,
+      message: `${clean}\n\n_${signature}_`,
+    });
+    console.log(`-> wa ${route.chatId} queue=${result.queue_id}`);
+  } catch (err) {
+    console.error("send failed:", err.message);
+    await postToSpace(
+      route.spaceName,
+      `⚠️ Not delivered to WhatsApp: ${err.message}`
+    ).catch((e) => console.error("failure notice post failed:", e.message));
+  }
+}
+
+app.post("/gchat", async (req, res) => {
+  try {
+    await verifyGoogleChat(req);
+  } catch (err) {
+    console.error("gchat auth failed:", err.message);
+    return res.status(401).json({ text: "Unauthorized" });
+  }
+
+  const event = req.body;
+
+  if (event.type === "ADDED_TO_SPACE") {
+    return res.json({
+      text: `Bridge connected. Space id: \`${event.space?.name}\``,
+    });
+  }
+
+  if (event.type !== "MESSAGE") return res.json({});
+
+  // Ack Chat immediately; relaying happens off the response path. Most messages
+  // arrive via the Pub/Sub stream — this branch only fires on an @mention.
+  res.json({});
+
+  relayChatMessage({
+    spaceName: event.space?.name,
+    text: event.message?.argumentText ?? event.message?.text,
+    senderId: event.message?.sender?.name,
+    senderName: event.message?.sender?.displayName,
+    senderType: event.message?.sender?.type,
+    messageName: event.message?.name,
+  });
+});
+
+// ------------------------------------ direction B: WhatsApp -> Google Chat
+
+app.post("/periskope", async (req, res) => {
+  if (!verifyPeriskope(req.rawBody, req.headers["x-periskope-signature"])) {
+    return res.status(401).send("Invalid signature");
+  }
+
+  res.status(200).send("ok"); // ack first, work after
+
+  const { event_type, data } = req.body;
+  if (event_type !== "message.created") return;
+  if (data?.from_me) return; // our own outbound, would loop
+  if (isDuplicate(data?.message_id || data?.unique_id)) return;
+
+  const route = store.byChatId(data.chat_id);
+  if (!route) {
+    console.log(`unmapped inbound from ${data.chat_id}`);
+    return;
+  }
+
+  const body = data.body?.trim();
+  const kind = data.message_type || "chat";
+  const isMedia = data.has_media || (kind !== "chat" && kind !== undefined);
+  const mediaUrl = data.media?.path;
+
+  let text;
+  if (isMedia) {
+    const noun =
+      kind === "ptt" ? "a voice message" : kind === "chat" ? "a file" : `a ${kind}`;
+    const lines = [`*${route.customerName}*`];
+    lines.push(body ? body : `_sent ${noun}_`);
+    if (data.media?.filename && !body) lines.push(`\`${data.media.filename}\``);
+    lines.push(
+      mediaUrl ? mediaUrl : `_(${noun} — couldn't get a link; open in WhatsApp)_`
+    );
+    if (!mediaUrl) {
+      console.warn(
+        `inbound media without url: type=${kind} media=${JSON.stringify(
+          data.media
+        )}`
+      );
+    }
+    text = lines.join("\n");
+  } else if (body) {
+    text = `*${route.customerName}*\n${body}`;
+  } else {
+    return;
+  }
+
+  try {
+    await postToSpace(route.spaceName, text);
+    console.log(`-> chat ${route.spaceName}`);
+  } catch (err) {
+    console.error("chat post failed:", err.message);
+  }
+});
+
+// ------------------------------------------------- provisioning from a CRM
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+app.post("/provision", async (req, res) => {
+  if (!PROVISION_TOKEN) {
+    console.error("/provision hit but PROVISION_TOKEN is not set — refusing");
+    return res
+      .status(503)
+      .json({ error: "provisioning disabled: PROVISION_TOKEN not set" });
+  }
+  if (!safeEqual(req.headers["x-provision-token"], PROVISION_TOKEN)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  try {
+    const { route, manualAdds } = await provision(req.body);
+    res.json({ ok: true, route, manualAdds });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Trigger a sheet sync now (same guard as /provision).
+app.post("/sync", async (req, res) => {
+  if (!PROVISION_TOKEN) return res.status(503).json({ error: "PROVISION_TOKEN not set" });
+  if (!safeEqual(req.headers["x-provision-token"], PROVISION_TOKEN)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const result = await sheetSync.poll();
+  res.json({ ok: true, ...result });
+});
+
+app.get("/health", (_req, res) =>
+  res.json({ ok: true, routes: store.all().length })
+);
+
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`relay on :${PORT}`));
+
+  // Stream every space message in via Workspace Events -> Pub/Sub, so team
+  // leads don't have to @mention the app. Set DISABLE_EVENTS=1 to skip.
+  if (process.env.DISABLE_EVENTS !== "1") {
+    const onMessage = async ({ message, messageName }) => {
+      let msg = message;
+      if (!msg?.text && messageName) {
+        try {
+          msg = await getMessage(messageName);
+        } catch (err) {
+          console.error("getMessage failed:", err.message);
+          return;
+        }
+      }
+      if (!msg) return;
+
+      await relayChatMessage({
+        spaceName:
+          msg.space?.name ||
+          (messageName || "").split("/messages/")[0] ||
+          undefined,
+        text: events.cleanText(msg),
+        senderId: msg.sender?.name,
+        senderName: msg.sender?.displayName,
+        senderType: msg.sender?.type,
+        messageName: msg.name || messageName,
+      });
+    };
+
+    // Retry with backoff — e.g. while the chat.messages.readonly delegation
+    // scope is still propagating after setup.
+    const startEvents = (attempt = 0) =>
+      events.start({ onMessage }).catch((err) => {
+        const wait = Math.min(60_000, 5_000 * 2 ** attempt);
+        console.error(
+          `events startup failed (${err.message}); retrying in ${wait / 1000}s`
+        );
+        setTimeout(() => startEvents(attempt + 1), wait);
+      });
+    startEvents();
+  }
+
+  // Auto-provision spaces from the Leegality sheet (no-op unless SHEET_ID set).
+  if (process.env.DISABLE_SHEET_SYNC !== "1") sheetSync.start();
+}
+
+module.exports = app;

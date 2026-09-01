@@ -1,0 +1,17 @@
+node_modules/
+
+# secrets / local config
+.env
+.env.*
+!.env.example
+service-account.json
+*.pem
+*.key
+
+# runtime state (per-deployment, may hold customer PII)
+routes.json
+sender-names.json
+
+*.tmp
+*.log
+.DS_Store

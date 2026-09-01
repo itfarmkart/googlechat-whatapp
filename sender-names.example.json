@@ -1,0 +1,4 @@
+{
+  "__comment": "Copy to sender-names.json. Google Chat user id -> display name, for people NOT in the farmkart.com directory (myrsolar.com / gmail partners). The relay logs an id here the first time that person posts. Keys are the numeric id ('users/' prefix also accepted). Edits are picked up without a restart.",
+  "000000000000000000000": "Example Partner"
+}
