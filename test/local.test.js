@@ -147,7 +147,7 @@ test("GET /health reports route count", async () => {
 
 // ---- direction A: /gchat (team lead -> customer) ---------------------------
 
-test("ADDED_TO_SPACE replies with the space id", async () => {
+test("ADDED_TO_SPACE with no usable name asks to be renamed", async () => {
   const res = await fetch(`${base}/gchat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -155,7 +155,48 @@ test("ADDED_TO_SPACE replies with the space id", async () => {
   });
   const json = await res.json();
   assert.match(json.text, /Bridge connected/);
+  assert.match(json.text, /Customer Name - 9876543210/);
   assert.equal(calls.wa.length, 0);
+});
+
+test("ADDED_TO_SPACE with a '<name> - <phone>' title links the space", async () => {
+  const res = await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "ADDED_TO_SPACE",
+      space: { name: "spaces/NEW1", displayName: "Ramesh Patidar - 9812300001" },
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+
+  const route = await store.byChatId("919812300001@c.us");
+  assert.ok(route, "route saved");
+  assert.equal(route.spaceName, "spaces/NEW1");
+  assert.equal(route.customerName, "Ramesh Patidar");
+  assert.ok(
+    calls.chat.some((c) => c.spaceName === "spaces/NEW1" && /goes to the customer/.test(c.text)),
+    "intro message posted"
+  );
+});
+
+test("ADDED_TO_SPACE for a phone already linked elsewhere is refused", async () => {
+  await store.addRoute({
+    customerName: "Someone",
+    customerPhone: "919812300002",
+    spaceName: "spaces/OLD",
+  });
+  const res = await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "ADDED_TO_SPACE",
+      space: { name: "spaces/OTHER", displayName: "Dup - 9812300002" },
+    }),
+  });
+  const json = await res.json();
+  assert.match(json.text, /already linked/);
 });
 
 test("a normal MESSAGE is relayed to WhatsApp with the sender's name", async () => {

@@ -183,9 +183,52 @@ app.post("/gchat", async (req, res) => {
   const event = req.body;
 
   if (event.type === "ADDED_TO_SPACE") {
-    return res.json({
-      text: `Bridge connected. Space id: \`${event.space?.name}\``,
-    });
+    // Self-register: a human created the space (named "<Name> - <phone>",
+    // "allow external" on) and added the bot. Pull the phone from the name,
+    // save the route, drop the orientation message.
+    const spaceName = event.space?.name;
+    const display = event.space?.displayName || "";
+    const m = display.match(/^(.*?)[\s]*[-—][\s]*(\+?\d[\d\s-]{7,}\d)\s*$/);
+    if (!spaceName || !m) {
+      return res.json({
+        text:
+          "Bridge connected. Rename this space to `Customer Name - 9876543210` " +
+          "and re-add me, or use /provision, so I can link it to a WhatsApp number.",
+      });
+    }
+    const custName = m[1].trim();
+    const digits = m[2].replace(/\D/g, "");
+    const phone = digits.length === 10 ? `91${digits}` : digits;
+
+    try {
+      const existing = await store.byPhone(phone);
+      if (existing && existing.spaceName !== spaceName) {
+        return res.json({
+          text: `⚠️ ${phone} is already linked to another space (\`${existing.spaceName}\`).`,
+        });
+      }
+      await store.addRoute({
+        customerName: custName,
+        customerPhone: phone,
+        spaceName,
+      });
+      await postToSpace(
+        spaceName,
+        [
+          `*${custName}* — ${phone}`,
+          "",
+          "Anything posted here goes to the customer on WhatsApp, signed with your name.",
+          "Their replies come back into this space.",
+          "",
+          "Start a line with `//` to keep it internal.",
+        ].join("\n")
+      ).catch(() => {});
+      console.log(`linked ${spaceName} <-> ${phone}@c.us (via ADDED_TO_SPACE)`);
+      return res.json({});
+    } catch (err) {
+      console.error("auto-link failed:", err.message);
+      return res.json({ text: `⚠️ Couldn't link this space: ${err.message}` });
+    }
   }
 
   if (event.type !== "MESSAGE") return res.json({});
