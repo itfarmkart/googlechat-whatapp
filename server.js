@@ -20,6 +20,7 @@ const sheetSync = require("./sheet-sync");
 const { resolveName } = require("./directory");
 
 const PORT = process.env.PORT || 8080;
+const BRAND = process.env.BRAND_NAME || "Farmkart"; // shown on the WhatsApp signature
 const GOOGLE_PROJECT_NUMBER = process.env.GOOGLE_PROJECT_NUMBER;
 const PERISKOPE_SIGNING_KEY = process.env.PERISKOPE_SIGNING_KEY;
 const PROVISION_TOKEN = process.env.PROVISION_TOKEN;
@@ -129,7 +130,7 @@ async function relayChatMessage({
   }
 
   const name = await resolveName(senderId, senderName);
-  const signature = name ? `${name}, Farmkart` : "Farmkart team";
+  const signature = name ? `${name}, ${BRAND}` : `${BRAND} team`;
   try {
     const result = await sendWhatsApp({
       chat_id: route.chatId,
