@@ -61,19 +61,23 @@ async function provision({
 }) {
   if (!name || !phone) throw new Error("--name and --phone are required");
 
+  // Periskope wants full international digits; sheet rows are often 10-digit.
+  const digits = String(phone).replace(/\D/g, "");
+  const intlPhone = digits.length === 10 ? `91${digits}` : digits;
+
   // 1. Don't create a space for a number that isn't on WhatsApp.
   //    A failed *check* is non-fatal (warn and continue); a check that comes
   //    back saying the number doesn't exist is fatal.
   let check;
   try {
-    check = await checkContact(phone);
+    check = await checkContact(intlPhone);
   } catch (err) {
     console.warn(`  contact check skipped: ${err.message}`);
   }
   if (check) {
     const entry = Array.isArray(check) ? check[0] : check?.contacts?.[0];
     if (entry && entry.exists === false) {
-      throw new Error(`${phone} is not registered on WhatsApp`);
+      throw new Error(`${intlPhone} is not registered on WhatsApp`);
     }
   }
 
@@ -120,7 +124,7 @@ async function provision({
   // 4. Save the mapping the relay reads on every message.
   const route = await store.addRoute({
     customerName: name,
-    customerPhone: phone,
+    customerPhone: intlPhone,
     spaceName: space.name,
     department: dept,
   });
