@@ -31,6 +31,7 @@ const TEAM_LEADS = [
   "abhishekn@myrsolar.com",
   "ravik@myrsolar.com",
   "anshulp@myrsolar.com",
+  "yashp@myrsolar.com",
 ];
 
 // The relay's single Workspace Events subscription targets every space this
