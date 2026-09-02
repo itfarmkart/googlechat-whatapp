@@ -21,15 +21,11 @@ const store = require("./store");
 const HOME_DOMAIN = (process.env.GOOGLE_IMPERSONATE_USER || "").split("@")[1];
 
 /**
- * Team leads added to every customer space — a mix of farmkart.com and
- * myrsolar.com (external members are enabled on the space for this reason).
- * Edit this list, or point it at a Google Group per org.
+ * Team leads added to every customer space. All myrsolar.com — the relay
+ * runs on the myrsolar Workspace, so these are same-domain members (no
+ * external-member limits). Edit this list, or point it at a Google Group.
  */
 const TEAM_LEADS = [
-  "akshayp@farmkart.com",
-  "lalitp@farmkart.com",
-  "yashpatidar@farmkart.com",
-  "atul@farmkart.com",
   "akshay@myrsolar.com",
   "shailendrar@myrsolar.com",
   "abhishekn@myrsolar.com",
