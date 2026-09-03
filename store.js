@@ -67,6 +67,26 @@ const fileBackend = {
   async all() {
     return fileLoad().routes;
   },
+  async logMessage(m) {
+    fs.appendFileSync(
+      `${FILE}.messages.jsonl`,
+      JSON.stringify({ ...m, createdAt: new Date().toISOString() }) + "\n"
+    );
+  },
+  async messages({ spaceName, chatId, limit = 100 } = {}) {
+    let lines;
+    try {
+      lines = fs.readFileSync(`${FILE}.messages.jsonl`, "utf8").trim().split("\n");
+    } catch {
+      return [];
+    }
+    return lines
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .filter((m) => (!spaceName || m.spaceName === spaceName) && (!chatId || m.chatId === chatId))
+      .reverse()
+      .slice(0, limit);
+  },
 };
 
 // ------------------------------------------------------------------ MySQL
@@ -122,7 +142,8 @@ function mysqlPool() {
 
 async function ensureTable() {
   if (tableReady) return tableReady;
-  tableReady = mysqlPool()
+  const p = mysqlPool();
+  tableReady = p
     .query(
       `CREATE TABLE IF NOT EXISTS routes (
          chat_id        VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -133,6 +154,26 @@ async function ensureTable() {
          created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
          UNIQUE KEY uniq_space_name (space_name)
        )`
+    )
+    .then(() =>
+      p.query(
+        `CREATE TABLE IF NOT EXISTS messages (
+           id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+           direction     VARCHAR(3)   NOT NULL,          -- 'out' team->customer, 'in' customer->team
+           space_name    VARCHAR(191) NOT NULL,
+           chat_id       VARCHAR(64)  NOT NULL,
+           customer_name VARCHAR(255) NULL,
+           sender_name   VARCHAR(255) NULL,              -- employee (out) / customer (in)
+           sender_email  VARCHAR(255) NULL,              -- employee email (out only)
+           body          TEXT         NULL,
+           media_url     VARCHAR(1024) NULL,
+           ref_id        VARCHAR(191) NULL,              -- periskope queue id (out) / chat msg name (in)
+           created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           INDEX idx_msg_space   (space_name, created_at),
+           INDEX idx_msg_chat    (chat_id, created_at),
+           INDEX idx_msg_created (created_at)
+         )`
+      )
     )
     .then(() => true);
   return tableReady;
@@ -191,6 +232,52 @@ const mysqlBackend = {
     );
     return rows.map(rowToRoute);
   },
+  async logMessage(m) {
+    await ensureTable();
+    await mysqlPool().query(
+      `INSERT INTO messages
+         (direction, space_name, chat_id, customer_name, sender_name, sender_email, body, media_url, ref_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        m.direction,
+        m.spaceName || "",
+        m.chatId || "",
+        m.customerName || null,
+        m.senderName || null,
+        m.senderEmail || null,
+        m.body || null,
+        m.mediaUrl || null,
+        m.refId || null,
+      ]
+    );
+  },
+  async messages({ spaceName, chatId, limit = 100 } = {}) {
+    await ensureTable();
+    const where = [];
+    const args = [];
+    if (spaceName) (where.push("space_name = ?"), args.push(spaceName));
+    if (chatId) (where.push("chat_id = ?"), args.push(chatId));
+    const sql =
+      "SELECT * FROM messages" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      " ORDER BY created_at DESC LIMIT ?";
+    args.push(Math.min(Number(limit) || 100, 1000));
+    const [rows] = await mysqlPool().query(sql, args);
+    return rows.map((r) => ({
+      id: r.id,
+      direction: r.direction,
+      spaceName: r.space_name,
+      chatId: r.chat_id,
+      customerName: r.customer_name,
+      senderName: r.sender_name,
+      senderEmail: r.sender_email,
+      body: r.body,
+      mediaUrl: r.media_url,
+      refId: r.ref_id,
+      createdAt:
+        r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
+    }));
+  },
 };
 
 // ------------------------------------------------------------------ facade
@@ -208,5 +295,16 @@ const byPhone = async (phone) => {
   }
 };
 const all = () => backend.all();
+const logMessage = (m) => backend.logMessage(m);
+const messages = (opts) => backend.messages(opts);
 
-module.exports = { addRoute, bySpace, byChatId, byPhone, all, toChatId };
+module.exports = {
+  addRoute,
+  bySpace,
+  byChatId,
+  byPhone,
+  all,
+  logMessage,
+  messages,
+  toChatId,
+};

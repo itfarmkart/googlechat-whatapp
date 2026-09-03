@@ -105,9 +105,11 @@ test.before(async () => {
 
 test.after(() => {
   server.close();
-  try {
-    fs.unlinkSync(STORE_FILE);
-  } catch {}
+  for (const f of [STORE_FILE, `${STORE_FILE}.messages.jsonl`]) {
+    try {
+      fs.unlinkSync(f);
+    } catch {}
+  }
 });
 
 test.beforeEach(resetCalls);
@@ -118,7 +120,7 @@ const sign = (body) =>
 async function waitFor(predicate, ms = 500) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error("waitFor: condition not met in time");
@@ -367,6 +369,67 @@ test("/pubsub drops a bot-sent message (loop guard)", async () => {
 test("/renew without token is 401", async () => {
   const res = await fetch(`${base}/renew`, { method: "POST" });
   assert.equal(res.status, 401);
+});
+
+// ---- message log ------------------------------------------------------
+
+test("/messages without token is 401", async () => {
+  const res = await fetch(`${base}/messages`);
+  assert.equal(res.status, 401);
+});
+
+test("relayed messages are recorded (both directions, with sender)", async () => {
+  await seedRoute(); // Ramesh Patidar / 919876543210 / spaces/AAA
+
+  // outbound via /gchat
+  await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "MESSAGE",
+      space: { name: "spaces/AAA" },
+      message: {
+        name: "spaces/AAA/messages/LOG1",
+        text: "your panels ship Tuesday",
+        sender: { name: "users/77", displayName: "Priya Sharma", type: "HUMAN" },
+      },
+    }),
+  });
+
+  // inbound via /periskope
+  const body = JSON.stringify({
+    event_type: "message.created",
+    data: {
+      message_id: "in-log-1",
+      chat_id: "919876543210@c.us",
+      body: "thanks, got it",
+      message_type: "chat",
+    },
+  });
+  await fetch(`${base}/periskope`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-periskope-signature": sign(body) },
+    body,
+  });
+
+  await waitFor(async () => (await store.messages({ spaceName: "spaces/AAA" })).length >= 2);
+
+  const res = await fetch(`${base}/messages?space=spaces/AAA`, {
+    headers: { "x-provision-token": PROVISION_TOKEN },
+  });
+  const { messages } = await res.json();
+
+  const out = messages.find((m) => m.direction === "out");
+  const inb = messages.find((m) => m.direction === "in");
+
+  assert.equal(out.body, "your panels ship Tuesday");
+  assert.equal(out.senderName, "Priya Sharma");
+  assert.equal(out.customerName, "Ramesh Patidar");
+  assert.equal(out.chatId, "919876543210@c.us");
+
+  assert.equal(inb.body, "thanks, got it");
+  assert.equal(inb.senderName, "Ramesh Patidar");
+  assert.equal(inb.direction, "in");
 });
 
 // ---- direction B: /periskope (customer -> team lead) ---------------------

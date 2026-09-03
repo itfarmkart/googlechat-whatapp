@@ -17,7 +17,7 @@ const { provision } = require("./provision");
 const store = require("./store");
 const events = require("./events");
 const sheetSync = require("./sheet-sync");
-const { resolveName } = require("./directory");
+const { resolveSender } = require("./directory");
 
 const PORT = process.env.PORT || 8080;
 const BRAND = process.env.BRAND_NAME || "Farmkart"; // shown on the WhatsApp signature
@@ -129,7 +129,7 @@ async function relayChatMessage({
     return;
   }
 
-  const name = await resolveName(senderId, senderName);
+  const { name, email } = await resolveSender(senderId, senderName);
   const signature = name ? `${name}, ${BRAND}` : `${BRAND} team`;
   try {
     const result = await sendWhatsApp({
@@ -137,6 +137,18 @@ async function relayChatMessage({
       message: `${clean}\n\n_${signature}_`,
     });
     console.log(`-> wa ${route.chatId} queue=${result.queue_id}`);
+    await store
+      .logMessage({
+        direction: "out",
+        spaceName: route.spaceName,
+        chatId: route.chatId,
+        customerName: route.customerName,
+        senderName: name,
+        senderEmail: email,
+        body: clean,
+        refId: result.queue_id,
+      })
+      .catch((e) => console.error("logMessage(out) failed:", e.message));
   } catch (err) {
     console.error("send failed:", err.message);
     await postToSpace(
@@ -293,8 +305,21 @@ async function periskopeInbound(data) {
     return;
   }
 
-  await postToSpace(route.spaceName, text);
+  const posted = await postToSpace(route.spaceName, text);
   console.log(`-> chat ${route.spaceName}`);
+
+  await store
+    .logMessage({
+      direction: "in",
+      spaceName: route.spaceName,
+      chatId: route.chatId,
+      customerName: route.customerName,
+      senderName: route.customerName,
+      body: body || null,
+      mediaUrl: mediaUrl || null,
+      refId: posted?.name || data.message_id || data.unique_id || null,
+    })
+    .catch((e) => console.error("logMessage(in) failed:", e.message));
 }
 
 app.post("/periskope", async (req, res) => {
@@ -420,6 +445,25 @@ app.post("/sync", async (req, res) => {
   }
   const result = await sheetSync.poll();
   res.json({ ok: true, ...result });
+});
+
+// Message log (audit). GET /messages?space=spaces/AAA | ?phone=9198... | ?limit=200
+app.get("/messages", async (req, res) => {
+  if (!PROVISION_TOKEN) return res.status(503).json({ error: "PROVISION_TOKEN not set" });
+  const tok = req.headers["x-provision-token"] || req.query.token;
+  if (!safeEqual(tok, PROVISION_TOKEN)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const rows = await store.messages({
+      spaceName: req.query.space || undefined,
+      chatId: req.query.phone ? store.toChatId(req.query.phone) : undefined,
+      limit: req.query.limit,
+    });
+    res.json({ ok: true, count: rows.length, messages: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.get("/health", async (_req, res) => {

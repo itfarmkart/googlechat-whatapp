@@ -21,7 +21,7 @@ const SCOPE = "https://www.googleapis.com/auth/directory.readonly";
 const MAP_FILE =
   process.env.SENDER_NAMES_FILE || path.join(__dirname, "sender-names.json");
 
-const cache = new Map(); // userId -> name | null
+const cache = new Map(); // userId -> { name, email } | null
 
 let manualMap = new Map();
 let manualMtime = 0;
@@ -46,29 +46,34 @@ function loadManualMap() {
 }
 loadManualMap();
 
-async function directoryName(id) {
+const EMPTY = { name: null, email: null };
+
+async function directoryProfile(id) {
   if (cache.has(id)) return cache.get(id);
   try {
     const token = await userToken([SCOPE]);
     const res = await fetch(
-      `https://people.googleapis.com/v1/people/${id}?personFields=names`,
+      `https://people.googleapis.com/v1/people/${id}?personFields=names,emailAddresses`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
     if (res.ok) {
       const j = await res.json();
       const names = j.names || [];
-      const primary =
-        names.find((n) => n.metadata?.primary) || names[0] || null;
-      const name = primary?.displayName || null;
-      cache.set(id, name);
-      return name;
+      const emails = j.emailAddresses || [];
+      const name =
+        (names.find((n) => n.metadata?.primary) || names[0])?.displayName || null;
+      const email =
+        (emails.find((e) => e.metadata?.primary) || emails[0])?.value || null;
+      const profile = { name, email };
+      cache.set(id, profile);
+      return profile;
     }
     if (res.status === 404) {
-      cache.set(id, null); // external / unknown — stop retrying
+      cache.set(id, EMPTY); // external / unknown — stop retrying
       console.log(
         `directory: no profile for users/${id} — add "${id}": "Their Name" to sender-names.json`
       );
-      return null;
+      return EMPTY;
     }
     console.error(
       `directory lookup ${res.status} for users/${id}: ${(await res.text())
@@ -78,24 +83,31 @@ async function directoryName(id) {
   } catch (err) {
     console.error("directory lookup failed:", err.message);
   }
-  return null;
+  return EMPTY;
 }
 
 /**
+ * Resolve a chat sender to { name, email }. `name` may come from the supplied
+ * displayName, the manual map, or the directory; `email` only from the
+ * directory.
  * @param {string} [senderId]    "users/123..." or "123..."
  * @param {string} [displayName] name already supplied by the caller
- * @returns {Promise<string|null>}
  */
-async function resolveName(senderId, displayName) {
-  if (displayName) return displayName;
-  if (!senderId) return null;
+async function resolveSender(senderId, displayName) {
+  if (displayName) return { name: displayName, email: null };
+  if (!senderId) return EMPTY;
 
   const id = String(senderId).replace(/^users\//, "");
 
   loadManualMap();
-  if (manualMap.has(id)) return manualMap.get(id);
+  if (manualMap.has(id)) return { name: manualMap.get(id), email: null };
 
-  return directoryName(id);
+  return directoryProfile(id);
 }
 
-module.exports = { resolveName };
+/** Back-compat: just the name. */
+async function resolveName(senderId, displayName) {
+  return (await resolveSender(senderId, displayName)).name;
+}
+
+module.exports = { resolveName, resolveSender };
