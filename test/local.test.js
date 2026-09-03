@@ -220,7 +220,7 @@ test("a normal MESSAGE is relayed to WhatsApp with the sender's name", async () 
   assert.match(calls.wa[0].message, /_Priya Sharma, Farmkart_/);
 });
 
-test("a line starting with // stays internal", async () => {
+test("a line starting with // stays internal but is logged as a note", async () => {
   await seedRoute();
   await fetch(`${base}/gchat`, {
     method: "POST",
@@ -228,10 +228,23 @@ test("a line starting with // stays internal", async () => {
     body: JSON.stringify({
       type: "MESSAGE",
       space: { name: "spaces/AAA" },
-      message: { text: "// remember to call the installer", sender: { displayName: "Priya Sharma" } },
+      message: {
+        name: "spaces/AAA/messages/NOTE1",
+        text: "// remember to call the installer",
+        sender: { displayName: "Priya Sharma", type: "HUMAN" },
+      },
     }),
   });
-  assert.equal(calls.wa.length, 0);
+  assert.equal(calls.wa.length, 0, "not sent to WhatsApp");
+
+  await waitFor(async () =>
+    (await store.messages({ spaceName: "spaces/AAA" })).some((m) => m.direction === "note")
+  );
+  const note = (await store.messages({ spaceName: "spaces/AAA" })).find(
+    (m) => m.direction === "note"
+  );
+  assert.match(note.body, /remember to call the installer/);
+  assert.equal(note.senderName, "Priya Sharma");
 });
 
 test("MESSAGE in an unmapped space is acked and not relayed", async () => {

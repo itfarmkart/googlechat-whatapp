@@ -159,7 +159,7 @@ async function ensureTable() {
       p.query(
         `CREATE TABLE IF NOT EXISTS messages (
            id            BIGINT AUTO_INCREMENT PRIMARY KEY,
-           direction     VARCHAR(3)   NOT NULL,          -- 'out' team->customer, 'in' customer->team
+           direction     VARCHAR(8)   NOT NULL,          -- 'out' team->customer, 'in' customer->team, 'note' internal (//)
            space_name    VARCHAR(191) NOT NULL,
            chat_id       VARCHAR(64)  NOT NULL,
            customer_name VARCHAR(255) NULL,

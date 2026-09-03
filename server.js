@@ -121,7 +121,7 @@ async function relayChatMessage({
   if (senderType && senderType !== "HUMAN") return; // our own / other apps
 
   const clean = (text || "").trim();
-  if (!clean || clean.startsWith("//")) return; // empty or internal-only
+  if (!clean) return;
 
   const route = await store.bySpace(spaceName);
   if (!route) {
@@ -130,6 +130,23 @@ async function relayChatMessage({
   }
 
   const { name, email } = await resolveSender(senderId, senderName);
+
+  // Internal-only line — record it, but don't send to the customer.
+  if (clean.startsWith("//")) {
+    await store
+      .logMessage({
+        direction: "note",
+        spaceName: route.spaceName,
+        chatId: route.chatId,
+        customerName: route.customerName,
+        senderName: name,
+        senderEmail: email,
+        body: clean,
+        refId: messageName || null,
+      })
+      .catch((e) => console.error("logMessage(note) failed:", e.message));
+    return;
+  }
   const signature = name ? `${name}, ${BRAND}` : `${BRAND} team`;
   try {
     const result = await sendWhatsApp({
