@@ -1,18 +1,21 @@
 name: relay-cron
 
-# Vercel is serverless — these two schedulers run here instead.
+# Vercel is serverless — these run here instead. Hourly:
+#   /renew  keeps the Workspace Events subscription alive
+#   /sync   provisions spaces for new COMPLETED rows in the Leegality sheet
+#           (idempotent: skips phones that already have a space, cap 15/run)
+#
+# Secrets (repo Settings -> Secrets and variables -> Actions):
 #   RELAY_URL        e.g. https://googlechat-whatapp.vercel.app   (no trailing slash)
 #   PROVISION_TOKEN  same value as the app's PROVISION_TOKEN env var
-# Add both under: repo Settings -> Secrets and variables -> Actions.
 
 on:
   schedule:
-    - cron: "17 * * * *"      # hourly-ish: renew the Workspace Events subscription
-    - cron: "30 6,18 * * *"   # 12:00 & 00:00 IST: sync the Leegality sheet
+    - cron: "23 * * * *" # hourly (:23 UTC — off the top-of-hour rush GitHub throttles)
   workflow_dispatch: {}
 
 jobs:
-  renew:
+  cron:
     runs-on: ubuntu-latest
     steps:
       - name: Renew Workspace Events subscription
@@ -20,23 +23,16 @@ jobs:
           RELAY_URL: ${{ secrets.RELAY_URL }}
           PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
         run: |
-          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"
-          URL="${URL%/}"
-          curl -fsS --retry 3 -X POST "$URL/renew" \
-            -H "x-provision-token: $(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
-          echo
+          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"; URL="${URL%/}"
+          TOK="$(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
+          echo "renew:"; curl -fsS --retry 3 -X POST "$URL/renew" -H "x-provision-token: $TOK"; echo
 
-  sync:
-    if: github.event.schedule == '30 6,18 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Sync Leegality sheet
+      - name: Sync the Leegality sheet
+        if: always() # run even if renew failed
         env:
           RELAY_URL: ${{ secrets.RELAY_URL }}
           PROVISION_TOKEN: ${{ secrets.PROVISION_TOKEN }}
         run: |
-          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"
-          URL="${URL%/}"
-          curl -fsS --retry 3 -X POST "$URL/sync" \
-            -H "x-provision-token: $(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
-          echo
+          URL="$(printf '%s' "$RELAY_URL" | tr -d '[:space:]')"; URL="${URL%/}"
+          TOK="$(printf '%s' "$PROVISION_TOKEN" | tr -d '[:space:]')"
+          echo "sync:"; curl -fsS --retry 3 -X POST "$URL/sync" -H "x-provision-token: $TOK"; echo
