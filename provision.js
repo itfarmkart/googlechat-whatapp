@@ -15,10 +15,47 @@ const {
   addAppToSpace,
   postToSpace,
   checkContact,
+  sendWhatsApp,
 } = require("./clients");
 const store = require("./store");
 
 const HOME_DOMAIN = (process.env.GOOGLE_IMPERSONATE_USER || "").split("@")[1];
+
+// First WhatsApp message a customer gets, the moment their space is created.
+// Override with the WELCOME_MESSAGE env var (use literal \n for line breaks).
+const DEFAULT_WELCOME_MESSAGE = `🌞 r-solar सोलर में आपका हार्दिक स्वागत है!
+
+आपके सोलर सिस्टम से जुड़ी सभी महत्वपूर्ण जानकारी, अपडेट एवं आवश्यक जानकारी लेने-देने के लिए इसी माध्यम का उपयोग किया जाएगा।
+
+सिस्टम शुरू होने तक r-solar आपके साथ है। 🤝`;
+const WELCOME_MESSAGE = (process.env.WELCOME_MESSAGE || DEFAULT_WELCOME_MESSAGE)
+  .replace(/\\n/g, "\n")
+  .trim();
+
+/** Send the one-time welcome message to a freshly-created customer route. */
+async function sendWelcomeMessage(route) {
+  try {
+    const result = await sendWhatsApp({
+      chat_id: route.chatId,
+      message: WELCOME_MESSAGE,
+    });
+    console.log(`  welcome -> wa ${route.chatId} queue=${result.queue_id}`);
+    await store
+      .logMessage({
+        direction: "out",
+        spaceName: route.spaceName,
+        chatId: route.chatId,
+        customerName: route.customerName,
+        senderName: null,
+        senderEmail: null,
+        body: WELCOME_MESSAGE,
+        refId: result.queue_id,
+      })
+      .catch((e) => console.error("logMessage(welcome) failed:", e.message));
+  } catch (err) {
+    console.error("welcome message failed:", err.message);
+  }
+}
 
 /**
  * Team leads added to every customer space. All myrsolar.com — the relay
@@ -35,6 +72,7 @@ const TEAM_LEADS = [
   "lalitp@myrsolar.com",
   "atul@myrsolar.com",
   "ashishm@myrsolar.com",
+  "anuragr@myrsolar.com",
 ];
 
 // The relay's single Workspace Events subscription targets every space this
@@ -129,6 +167,9 @@ async function provision({
     department: dept,
   });
 
+  // 4b. Welcome message to the customer — first thing they see on WhatsApp.
+  await sendWelcomeMessage(route);
+
   // 5. Orientation message so leads know how this space behaves.
   const lines = [
     `*${name}* — ${phone}`,
@@ -167,4 +208,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { provision, TEAM_LEADS };
+module.exports = { provision, TEAM_LEADS, sendWelcomeMessage };

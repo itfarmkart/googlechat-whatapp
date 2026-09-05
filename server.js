@@ -13,7 +13,7 @@ const { createHmac, timingSafeEqual } = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 
 const { postToSpace, sendWhatsApp, getMessage } = require("./clients");
-const { provision } = require("./provision");
+const { provision, sendWelcomeMessage } = require("./provision");
 const store = require("./store");
 const events = require("./events");
 const sheetSync = require("./sheet-sync");
@@ -237,11 +237,13 @@ app.post("/gchat", async (req, res) => {
           text: `⚠️ ${phone} is already linked to another space (\`${existing.spaceName}\`).`,
         });
       }
-      await store.addRoute({
+      const isNew = !existing;
+      const route = await store.addRoute({
         customerName: custName,
         customerPhone: phone,
         spaceName,
       });
+      if (isNew) await sendWelcomeMessage(route);
       await postToSpace(
         spaceName,
         [
