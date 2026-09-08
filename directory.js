@@ -83,6 +83,10 @@ async function directoryProfile(id) {
   } catch (err) {
     console.error("directory lookup failed:", err.message);
   }
+  // Negative-cache any failure too: the People API is on the message relay's
+  // critical path, so we retry at most once per cold start per user, not once
+  // per message. A fixed config picks up on the next deploy / cold start.
+  cache.set(id, EMPTY);
   return EMPTY;
 }
 
@@ -94,15 +98,23 @@ async function directoryProfile(id) {
  * @param {string} [displayName] name already supplied by the caller
  */
 async function resolveSender(senderId, displayName) {
-  if (displayName) return { name: displayName, email: null };
-  if (!senderId) return EMPTY;
-
-  const id = String(senderId).replace(/^users\//, "");
+  const id = senderId ? String(senderId).replace(/^users\//, "") : null;
+  if (!id) return { name: displayName || null, email: null };
 
   loadManualMap();
-  if (manualMap.has(id)) return { name: manualMap.get(id), email: null };
+  if (manualMap.has(id)) {
+    return { name: displayName || manualMap.get(id), email: null };
+  }
 
-  return directoryProfile(id);
+  // Directory profile is the only source of the sender's email. Still consult
+  // it when we already have a name, but never let it override the name we were
+  // handed. Fully error-safe + cached, so a broken/disabled People API just
+  // means email stays null.
+  const prof = await directoryProfile(id);
+  return {
+    name: displayName || prof.name || null,
+    email: prof.email || null,
+  };
 }
 
 /** Back-compat: just the name. */

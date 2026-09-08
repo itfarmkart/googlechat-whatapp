@@ -181,12 +181,15 @@ async function relayChatMessage({
  */
 async function handleChatEvent({ message, messageName }) {
   let msg = message;
-  if (!msg?.text && messageName) {
+  // The Pub/Sub payload carries the sender id but not their display name, and
+  // often not the text either. Fetch the full resource when either is missing —
+  // spaces.messages.get returns sender.displayName for human senders.
+  if ((!msg?.text || !msg?.sender?.displayName) && messageName) {
     try {
-      msg = await getMessage(messageName);
+      msg = (await getMessage(messageName)) || msg;
     } catch (err) {
       console.error("getMessage failed:", err.message);
-      return;
+      if (!msg) return;
     }
   }
   if (!msg) return;

@@ -46,7 +46,7 @@ async function sendWelcomeMessage(route) {
         spaceName: route.spaceName,
         chatId: route.chatId,
         customerName: route.customerName,
-        senderName: null,
+        senderName: "R-Solar (auto welcome)",
         senderEmail: null,
         body: WELCOME_MESSAGE,
         refId: result.queue_id,
