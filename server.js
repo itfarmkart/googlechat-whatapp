@@ -491,7 +491,11 @@ app.get("/messages", async (req, res) => {
 app.get("/health", async (_req, res) => {
   try {
     const routes = await store.all();
-    res.json({ ok: true, routes: routes.length });
+    res.json({
+      ok: true,
+      routes: routes.length,
+      commit: (process.env.VERCEL_GIT_COMMIT_SHA || "").slice(0, 7) || null,
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
