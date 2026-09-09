@@ -130,6 +130,11 @@ async function relayChatMessage({
   }
 
   const { name, email } = await resolveSender(senderId, senderName);
+  console.log(
+    `SENDER id=${senderId || "-"} in="${senderName || "-"}" -> name="${
+      name || "-"
+    }" email="${email || "-"}"`
+  );
 
   // Internal-only line — record it, but don't send to the customer.
   if (clean.startsWith("//")) {
@@ -184,15 +189,25 @@ async function handleChatEvent({ message, messageName }) {
   // The Pub/Sub payload carries the sender id but not their display name, and
   // often not the text either. Fetch the full resource when either is missing —
   // spaces.messages.get returns sender.displayName for human senders.
+  let fetched = false;
   if ((!msg?.text || !msg?.sender?.displayName) && messageName) {
     try {
-      msg = (await getMessage(messageName)) || msg;
+      const full = await getMessage(messageName);
+      if (full) {
+        msg = full;
+        fetched = true;
+      }
     } catch (err) {
       console.error("getMessage failed:", err.message);
       if (!msg) return;
     }
   }
   if (!msg) return;
+  console.log(
+    `CHATEVT sender=${msg.sender?.name || "-"} display="${
+      msg.sender?.displayName || "-"
+    }" fetched=${fetched} text?=${!!msg.text}`
+  );
 
   await relayChatMessage({
     spaceName:

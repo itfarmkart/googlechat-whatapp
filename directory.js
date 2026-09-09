@@ -65,6 +65,7 @@ async function directoryProfile(id) {
       const email =
         (emails.find((e) => e.metadata?.primary) || emails[0])?.value || null;
       const profile = { name, email };
+      console.log(`directory: users/${id} -> "${name}" <${email}>`);
       cache.set(id, profile);
       return profile;
     }
