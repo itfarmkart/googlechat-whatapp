@@ -1,16 +1,19 @@
 /**
- * Resolve a Google Chat `users/{id}` to a display name for the WhatsApp
- * signature.
+ * Resolve a Google Chat `users/{id}` to a display name + email for the
+ * WhatsApp signature and the message audit log.
  *
  * Order of preference:
  *   1. a name handed in by the /gchat webhook (it carries displayName),
  *   2. a manual entry in sender-names.json (people not in our directory —
- *      e.g. myrsolar.com partners),
- *   3. the People API directory profile (farmkart.com users), cached,
+ *      e.g. external partners),
+ *   3. the Workspace directory profile (people:listDirectoryPeople), cached,
  *   4. null — caller falls back to a generic sign-off.
  *
- * People API (not Admin SDK) so it works for any user, no admin role needed.
- * Needs DWD scope: https://www.googleapis.com/auth/directory.readonly
+ * Uses people:listDirectoryPeople (NOT people.get — that only reads the
+ * caller's own contacts and returns an empty profile for directory members).
+ * The whole domain profile list is pulled once and cached. No admin role
+ * needed; DWD scope: https://www.googleapis.com/auth/directory.readonly
+ * (also requires "contact sharing" ON in Admin console → Directory settings).
  */
 
 const fs = require("fs");
@@ -22,6 +25,72 @@ const MAP_FILE =
   process.env.SENDER_NAMES_FILE || path.join(__dirname, "sender-names.json");
 
 const cache = new Map(); // userId -> { name, email } | null
+
+// Whole-directory snapshot: userId -> { name, email }. Refreshed on a TTL.
+const DIRECTORY_TTL_MS = 60 * 60 * 1000;
+let dirMap = null;
+let dirLoadedAt = 0;
+let dirLoading = null;
+
+async function loadDirectory() {
+  const token = await userToken([SCOPE]);
+  const map = new Map();
+  let pageToken = "";
+  for (let page = 0; page < 25; page++) {
+    const url = new URL(
+      "https://people.googleapis.com/v1/people:listDirectoryPeople"
+    );
+    url.searchParams.set("readMask", "names,emailAddresses");
+    url.searchParams.set("sources", "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE");
+    url.searchParams.set("pageSize", "1000");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const body = (await res.text()).replace(/\s+/g, " ").slice(0, 200);
+      throw new Error(`listDirectoryPeople ${res.status}: ${body}`);
+    }
+    const j = await res.json();
+    for (const p of j.people || []) {
+      const id = String(p.resourceName || "").replace(/^people\//, "");
+      if (!id) continue;
+      const names = p.names || [];
+      const emails = p.emailAddresses || [];
+      const name =
+        (names.find((n) => n.metadata?.primary) || names[0])?.displayName ||
+        null;
+      const email =
+        (emails.find((e) => e.metadata?.primary) || emails[0])?.value || null;
+      map.set(id, { name, email });
+    }
+    pageToken = j.nextPageToken || "";
+    if (!pageToken) break;
+  }
+  console.log(`directory: loaded ${map.size} domain profiles`);
+  return map;
+}
+
+async function ensureDirectory() {
+  if (dirMap && Date.now() - dirLoadedAt < DIRECTORY_TTL_MS) return dirMap;
+  if (dirLoading) return dirLoading;
+  dirLoading = loadDirectory()
+    .then((m) => {
+      dirMap = m;
+      dirLoadedAt = Date.now();
+      cache.clear(); // drop per-id negatives so new hires resolve
+      return m;
+    })
+    .catch((err) => {
+      console.error("directory load failed:", err.message);
+      return dirMap || new Map(); // serve stale on failure
+    })
+    .finally(() => {
+      dirLoading = null;
+    });
+  return dirLoading;
+}
 
 let manualMap = new Map();
 let manualMtime = 0;
@@ -51,42 +120,19 @@ const EMPTY = { name: null, email: null };
 async function directoryProfile(id) {
   if (cache.has(id)) return cache.get(id);
   try {
-    const token = await userToken([SCOPE]);
-    const res = await fetch(
-      `https://people.googleapis.com/v1/people/${id}?personFields=names,emailAddresses`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (res.ok) {
-      const j = await res.json();
-      const names = j.names || [];
-      const emails = j.emailAddresses || [];
-      const name =
-        (names.find((n) => n.metadata?.primary) || names[0])?.displayName || null;
-      const email =
-        (emails.find((e) => e.metadata?.primary) || emails[0])?.value || null;
-      const profile = { name, email };
-      console.log(`directory: users/${id} -> "${name}" <${email}>`);
-      cache.set(id, profile);
-      return profile;
+    const dir = await ensureDirectory();
+    const hit = dir.get(id);
+    if (hit && (hit.name || hit.email)) {
+      console.log(`directory: users/${id} -> "${hit.name}" <${hit.email}>`);
+      cache.set(id, hit);
+      return hit;
     }
-    if (res.status === 404) {
-      cache.set(id, EMPTY); // external / unknown — stop retrying
-      console.log(
-        `directory: no profile for users/${id} — add "${id}": "Their Name" to sender-names.json`
-      );
-      return EMPTY;
-    }
-    console.error(
-      `directory lookup ${res.status} for users/${id}: ${(await res.text())
-        .replace(/\s+/g, " ")
-        .slice(0, 160)}`
+    console.log(
+      `directory: no domain profile for users/${id} — add "${id}": "Their Name" to sender-names.json if external`
     );
   } catch (err) {
     console.error("directory lookup failed:", err.message);
   }
-  // Negative-cache any failure too: the People API is on the message relay's
-  // critical path, so we retry at most once per cold start per user, not once
-  // per message. A fixed config picks up on the next deploy / cold start.
   cache.set(id, EMPTY);
   return EMPTY;
 }
