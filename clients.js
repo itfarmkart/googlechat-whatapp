@@ -196,6 +196,14 @@ const sendWhatsApp = ({ chat_id, message, media }) =>
 const checkContact = (phone) =>
   periskope("/contacts/check", { body: { contact_ids: [String(phone)] } });
 
+/**
+ * Convert up to 1000 legacy storage.googleapis.com media links to the new
+ * api.periskope.app/app/media/... form. No access/expiry params -> keeps
+ * whatever the org's Media Privacy setting already is (public, by default).
+ */
+const migrateMediaUrls = (urls) =>
+  periskope("/media/migrate-url/batch", { body: { urls } });
+
 module.exports = {
   createSpaceWithMembers,
   addHumanToSpace,
@@ -204,6 +212,7 @@ module.exports = {
   getMessage,
   sendWhatsApp,
   checkContact,
+  migrateMediaUrls,
   userToken,
   saToken,
   serviceAccountKey,

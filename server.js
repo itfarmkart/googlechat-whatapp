@@ -12,7 +12,7 @@ const express = require("express");
 const { createHmac, timingSafeEqual } = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 
-const { postToSpace, sendWhatsApp, getMessage } = require("./clients");
+const { postToSpace, sendWhatsApp, getMessage, migrateMediaUrls } = require("./clients");
 const { provision, sendWelcomeMessage } = require("./provision");
 const store = require("./store");
 const events = require("./events");
@@ -482,6 +482,55 @@ app.post("/sync", async (req, res) => {
   }
   const result = await sheetSync.poll();
   res.json({ ok: true, ...result });
+});
+
+// One-time cleanup: Periskope is deprecating direct storage.googleapis.com
+// media links (after 15 Sep 2026) in favour of api.periskope.app/app/media/...
+// ones. Re-points every stored messages.media_url that still uses the old
+// host. Safe to call more than once — nothing left to migrate is a no-op.
+app.post("/migrate-media", async (req, res) => {
+  if (!PROVISION_TOKEN) return res.status(503).json({ error: "PROVISION_TOKEN not set" });
+  const tok = req.headers["x-provision-token"] || req.query.token;
+  if (!safeEqual(tok, PROVISION_TOKEN)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  try {
+    const rows = await store.mediaUrlsToMigrate("storage.googleapis.com");
+    if (!rows.length) return res.json({ ok: true, found: 0, rowsUpdated: 0 });
+
+    const uniqueUrls = [...new Set(rows.map((r) => r.mediaUrl))];
+    const oldToNew = new Map();
+    const errors = [];
+
+    for (let i = 0; i < uniqueUrls.length; i += 1000) {
+      const chunk = uniqueUrls.slice(i, i + 1000);
+      const resp = await migrateMediaUrls(chunk);
+      (resp.results || []).forEach((r, idx) => {
+        if (r.success) oldToNew.set(chunk[idx], r.url);
+        else errors.push(`${chunk[idx]}: ${r.error}`);
+      });
+    }
+
+    let rowsUpdated = 0;
+    for (const row of rows) {
+      const next = oldToNew.get(row.mediaUrl);
+      if (!next) continue;
+      await store.updateMediaUrl(row.id, next);
+      rowsUpdated++;
+    }
+
+    res.json({
+      ok: true,
+      found: rows.length,
+      uniqueUrls: uniqueUrls.length,
+      migrated: oldToNew.size,
+      rowsUpdated,
+      errors: errors.slice(0, 20),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Message log (audit). GET /messages?space=spaces/AAA | ?phone=9198... | ?limit=200

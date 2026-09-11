@@ -87,6 +87,34 @@ const fileBackend = {
       .reverse()
       .slice(0, limit);
   },
+  async mediaUrlsToMigrate(pattern) {
+    let lines;
+    try {
+      lines = fs.readFileSync(`${FILE}.messages.jsonl`, "utf8").trim().split("\n");
+    } catch {
+      return [];
+    }
+    return lines
+      .filter(Boolean)
+      .map((l, id) => ({ id, m: JSON.parse(l) }))
+      .filter(({ m }) => m.mediaUrl && m.mediaUrl.includes(pattern))
+      .map(({ id, m }) => ({ id, mediaUrl: m.mediaUrl }));
+  },
+  async updateMediaUrl(id, mediaUrl) {
+    let lines;
+    try {
+      lines = fs.readFileSync(`${FILE}.messages.jsonl`, "utf8").trim().split("\n");
+    } catch {
+      return;
+    }
+    const parsed = lines.filter(Boolean).map((l) => JSON.parse(l));
+    if (!parsed[id]) return;
+    parsed[id].mediaUrl = mediaUrl;
+    fs.writeFileSync(
+      `${FILE}.messages.jsonl`,
+      parsed.map((m) => JSON.stringify(m)).join("\n") + "\n"
+    );
+  },
 };
 
 // ------------------------------------------------------------------ MySQL
@@ -278,6 +306,21 @@ const mysqlBackend = {
         r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
     }));
   },
+  async mediaUrlsToMigrate(pattern) {
+    await ensureTable();
+    const [rows] = await mysqlPool().query(
+      "SELECT id, media_url FROM messages WHERE media_url LIKE CONCAT('%', ?, '%')",
+      [pattern]
+    );
+    return rows.map((r) => ({ id: r.id, mediaUrl: r.media_url }));
+  },
+  async updateMediaUrl(id, mediaUrl) {
+    await ensureTable();
+    await mysqlPool().query("UPDATE messages SET media_url = ? WHERE id = ?", [
+      mediaUrl,
+      id,
+    ]);
+  },
 };
 
 // ------------------------------------------------------------------ facade
@@ -297,6 +340,8 @@ const byPhone = async (phone) => {
 const all = () => backend.all();
 const logMessage = (m) => backend.logMessage(m);
 const messages = (opts) => backend.messages(opts);
+const mediaUrlsToMigrate = (pattern) => backend.mediaUrlsToMigrate(pattern);
+const updateMediaUrl = (id, mediaUrl) => backend.updateMediaUrl(id, mediaUrl);
 
 module.exports = {
   addRoute,
@@ -306,5 +351,7 @@ module.exports = {
   all,
   logMessage,
   messages,
+  mediaUrlsToMigrate,
+  updateMediaUrl,
   toChatId,
 };
