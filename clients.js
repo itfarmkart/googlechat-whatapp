@@ -168,6 +168,26 @@ async function getMessage(messageName) {
   return chatRequest(`${CHAT_BASE}/${messageName}`, { token });
 }
 
+/**
+ * Download a Chat message attachment's raw bytes (a file a human posted in a
+ * customer space). `resourceName` is attachment.attachmentDataRef.resourceName.
+ * App auth (chat.bot) can read it since the bot is a member of every space.
+ * Drive-hosted attachments (driveDataRef, no attachmentDataRef) aren't
+ * downloadable this way — caller should skip those.
+ */
+async function downloadAttachment(resourceName) {
+  const token = await appToken();
+  const res = await fetch(`${CHAT_BASE}/media/${resourceName}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Chat media download ${res.status}: ${(await res.text()).slice(0, 200)}`
+    );
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
 // --------------------------------------------------------------- periskope
 
 async function periskope(path, { method = "POST", body }) {
@@ -210,6 +230,7 @@ module.exports = {
   addAppToSpace,
   postToSpace,
   getMessage,
+  downloadAttachment,
   sendWhatsApp,
   checkContact,
   migrateMediaUrls,

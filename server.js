@@ -12,7 +12,13 @@ const express = require("express");
 const { createHmac, timingSafeEqual } = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 
-const { postToSpace, sendWhatsApp, getMessage, migrateMediaUrls } = require("./clients");
+const {
+  postToSpace,
+  sendWhatsApp,
+  getMessage,
+  downloadAttachment,
+  migrateMediaUrls,
+} = require("./clients");
 const { provision, sendWelcomeMessage } = require("./provision");
 const store = require("./store");
 const events = require("./events");
@@ -109,6 +115,31 @@ function isDuplicate(id) {
  * Workspace Events -> Pub/Sub stream (every message) — so it dedupes by
  * message name and drops anything a bot sent (our own posts would loop).
  */
+function periskopeMediaType(mimeType) {
+  if (/^image\//.test(mimeType)) return "image";
+  if (/^video\//.test(mimeType)) return "video";
+  if (/^audio\//.test(mimeType)) return "audio";
+  return "document";
+}
+
+/** Download one Chat attachment and shape it for Periskope's media field. */
+async function attachmentToMedia(att) {
+  const resourceName = att.attachmentDataRef?.resourceName;
+  if (!resourceName) {
+    throw new Error(
+      `attachment "${att.contentName || "?"}" has no downloadable resource (Drive-hosted files aren't supported)`
+    );
+  }
+  const buf = await downloadAttachment(resourceName);
+  const mimetype = att.contentType || "application/octet-stream";
+  return {
+    type: periskopeMediaType(mimetype),
+    filename: att.contentName || "file",
+    mimetype,
+    filedata: buf.toString("base64"),
+  };
+}
+
 async function relayChatMessage({
   spaceName,
   text,
@@ -116,12 +147,14 @@ async function relayChatMessage({
   senderName,
   senderType,
   messageName,
+  attachments,
 }) {
   if (messageName && isDuplicate(`msg:${messageName}`)) return;
   if (senderType && senderType !== "HUMAN") return; // our own / other apps
 
   const clean = (text || "").trim();
-  if (!clean) return;
+  const files = (attachments || []).filter((a) => a?.attachmentDataRef?.resourceName);
+  if (!clean && !files.length) return;
 
   const route = await store.bySpace(spaceName);
   if (!route) {
@@ -136,8 +169,10 @@ async function relayChatMessage({
     }" email="${email || "-"}"`
   );
 
-  // Internal-only line — record it, but don't send to the customer.
+  // Internal-only line — record it, but don't send to the customer (files
+  // included: an attachment on a `//` message never reaches WhatsApp).
   if (clean.startsWith("//")) {
+    const names = files.map((f) => f.contentName).filter(Boolean).join(", ");
     await store
       .logMessage({
         direction: "note",
@@ -146,31 +181,61 @@ async function relayChatMessage({
         customerName: route.customerName,
         senderName: name,
         senderEmail: email,
-        body: clean,
+        body: names ? `${clean} [${names}]` : clean,
         refId: messageName || null,
       })
       .catch((e) => console.error("logMessage(note) failed:", e.message));
     return;
   }
   const signature = name ? `${name}, ${BRAND}` : `${BRAND} team`;
+  const caption = clean ? `${clean}\n\n_${signature}_` : `_${signature}_`;
   try {
-    const result = await sendWhatsApp({
-      chat_id: route.chatId,
-      message: `${clean}\n\n_${signature}_`,
-    });
-    console.log(`-> wa ${route.chatId} queue=${result.queue_id}`);
-    await store
-      .logMessage({
-        direction: "out",
-        spaceName: route.spaceName,
-        chatId: route.chatId,
-        customerName: route.customerName,
-        senderName: name,
-        senderEmail: email,
-        body: clean,
-        refId: result.queue_id,
-      })
-      .catch((e) => console.error("logMessage(out) failed:", e.message));
+    if (files.length) {
+      let first = true;
+      for (const att of files) {
+        const media = await attachmentToMedia(att);
+        const result = await sendWhatsApp({
+          chat_id: route.chatId,
+          message: first ? caption : undefined,
+          media,
+        });
+        first = false;
+        console.log(
+          `-> wa ${route.chatId} queue=${result.queue_id} file="${att.contentName}"`
+        );
+        await store
+          .logMessage({
+            direction: "out",
+            spaceName: route.spaceName,
+            chatId: route.chatId,
+            customerName: route.customerName,
+            senderName: name,
+            senderEmail: email,
+            body: clean || null,
+            mediaUrl: att.contentName || null,
+            refId: result.queue_id,
+          })
+          .catch((e) => console.error("logMessage(out) failed:", e.message));
+      }
+    } else {
+      const result = await sendWhatsApp({
+        chat_id: route.chatId,
+        message: caption,
+      });
+      console.log(`-> wa ${route.chatId} queue=${result.queue_id}`);
+      await store
+        .logMessage({
+          direction: "out",
+          spaceName: route.spaceName,
+          chatId: route.chatId,
+          customerName: route.customerName,
+          senderName: name,
+          senderEmail: email,
+          body: clean,
+          refId: result.queue_id,
+        })
+        .catch((e) => console.error("logMessage(out) failed:", e.message));
+    }
   } catch (err) {
     console.error("send failed:", err.message);
     await postToSpace(
@@ -217,6 +282,7 @@ async function handleChatEvent({ message, messageName }) {
     senderName: msg.sender?.displayName,
     senderType: msg.sender?.type,
     messageName: msg.name || messageName,
+    attachments: msg.attachment,
   });
 }
 
@@ -294,6 +360,7 @@ app.post("/gchat", async (req, res) => {
       senderName: event.message?.sender?.displayName,
       senderType: event.message?.sender?.type,
       messageName: event.message?.name,
+      attachments: event.message?.attachment,
     });
   } catch (err) {
     console.error("gchat relay error:", err.message);

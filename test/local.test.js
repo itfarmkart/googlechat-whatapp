@@ -72,6 +72,8 @@ require.cache[clientsPath] = {
     getMessage: async () => {
       throw new Error("getMessage not stubbed");
     },
+    downloadAttachment: async (resourceName) =>
+      Buffer.from(`fake-bytes:${resourceName}`),
     userToken: async () => "stub-token",
     saToken: async () => "stub-sa-token",
     serviceAccountKey: () => ({
@@ -260,6 +262,98 @@ test("MESSAGE in an unmapped space is acked and not relayed", async () => {
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {});
   assert.equal(calls.wa.length, 0);
+});
+
+test("an attachment with no caption is downloaded and sent as WhatsApp media", async () => {
+  await seedRoute();
+  const res = await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "MESSAGE",
+      space: { name: "spaces/AAA" },
+      message: {
+        name: "spaces/AAA/messages/M1",
+        sender: { displayName: "Priya Sharma" },
+        attachment: [
+          {
+            contentName: "quote.pdf",
+            contentType: "application/pdf",
+            attachmentDataRef: { resourceName: "spaces/AAA/messages/M1/attachments/A1" },
+          },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(calls.wa.length, 1);
+  assert.equal(calls.wa[0].chat_id, "919876543210@c.us");
+  assert.equal(calls.wa[0].media.type, "document");
+  assert.equal(calls.wa[0].media.filename, "quote.pdf");
+  assert.equal(calls.wa[0].media.mimetype, "application/pdf");
+  assert.ok(calls.wa[0].media.filedata, "media bytes were attached");
+  assert.match(calls.wa[0].message, /_Priya Sharma, Farmkart_/);
+});
+
+test("an attachment with a caption sends both the text and the file", async () => {
+  await seedRoute();
+  await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "MESSAGE",
+      space: { name: "spaces/AAA" },
+      message: {
+        name: "spaces/AAA/messages/M2",
+        text: "Here is your invoice",
+        sender: { displayName: "Priya Sharma" },
+        attachment: [
+          {
+            contentName: "invoice.png",
+            contentType: "image/png",
+            attachmentDataRef: { resourceName: "spaces/AAA/messages/M2/attachments/A1" },
+          },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(calls.wa.length, 1);
+  assert.equal(calls.wa[0].media.type, "image");
+  assert.match(calls.wa[0].message, /Here is your invoice/);
+  assert.match(calls.wa[0].message, /_Priya Sharma, Farmkart_/);
+});
+
+test("an attachment on a // internal line is logged but never sent to WhatsApp", async () => {
+  await seedRoute();
+  await fetch(`${base}/gchat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "MESSAGE",
+      space: { name: "spaces/AAA" },
+      message: {
+        name: "spaces/AAA/messages/NOTE2",
+        text: "// internal copy only",
+        sender: { displayName: "Priya Sharma" },
+        attachment: [
+          {
+            contentName: "internal.pdf",
+            contentType: "application/pdf",
+            attachmentDataRef: { resourceName: "spaces/AAA/messages/NOTE2/attachments/A1" },
+          },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(calls.wa.length, 0, "not sent to WhatsApp");
+  await waitFor(async () =>
+    (await store.messages({ spaceName: "spaces/AAA" })).some(
+      (m) => m.direction === "note" && m.body.includes("internal.pdf")
+    )
+  );
 });
 
 test("a bot-sent MESSAGE is not relayed (loop guard)", async () => {
