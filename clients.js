@@ -171,12 +171,16 @@ async function getMessage(messageName) {
 /**
  * Download a Chat message attachment's raw bytes (a file a human posted in a
  * customer space). `resourceName` is attachment.attachmentDataRef.resourceName.
- * App auth (chat.bot) can read it since the bot is a member of every space.
+ * The media.download API only accepts user auth (DWD impersonation), not the
+ * app's own identity — same as getMessage(), reads as the impersonated user,
+ * who is a member of every customer space.
  * Drive-hosted attachments (driveDataRef, no attachmentDataRef) aren't
  * downloadable this way — caller should skip those.
  */
 async function downloadAttachment(resourceName) {
-  const token = await appToken();
+  const token = await userToken([
+    "https://www.googleapis.com/auth/chat.messages.readonly",
+  ]);
   const res = await fetch(`${CHAT_BASE}/media/${resourceName}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` },
   });
